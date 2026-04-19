@@ -37,6 +37,7 @@ typedef enum {
     MSG_PONG = 4,
     MSG_LEAVE = 5,
     MSG_ERROR = 6,
+    MSG_MAP = 7,
     MSG_SET_READY = 10,
     MSG_SET_STATUS = 20,
     MSG_WINNER = 23,
@@ -60,13 +61,17 @@ typedef struct {
 
 
 typedef struct {
-    char server_id[20];
+    char version[20];
+    char name[30];
+} payload_hello_t;
+typedef struct {
+    char version[20];
     uint8_t game_status;
     uint8_t players_count;
     struct {
         uint8_t ready;
         char name[30];
-    } players[];
+    } players[MAX_PLAYERS];
 } payload_welcome_t; 
 typedef struct {
     char error[];
@@ -75,46 +80,67 @@ typedef struct {
     uint8_t game_status;
 } payload_set_status_t;
 typedef struct {
-    uint8_t winnder_id;
+    uint8_t id;
 } payload_winner_t;
 typedef struct {
     uint8_t width;
     uint8_t height;
-    uint8_t map[];
+    uint8_t map[MAP_SIZE_MAX];
 } payload_map_t;
-uint8_t move_direction;
+typedef struct {
+    uint8_t direction;
+} payload_move_attempt_t;
 typedef struct {
     uint8_t player_id;
-    uint16_t new_coord;
+    uint16_t coord;
 } payload_moved_t;
 typedef struct {
-    uint16_t bomb_coord;
+    uint16_t coord;
 } payload_bomb_attempt_t;
 typedef struct {
-    uint8_t source_player_id;
-    uint16_t bomb_coord;
+    uint8_t player_id;
+    uint16_t coord;
 } payload_bomb_t;
 typedef struct {
     uint8_t radius;
-    uint16_t bomb_coord;
+    uint16_t coord;
 } payload_explosion_start_t;
 typedef struct {
-    uint16_t bomb_coord;
+    uint16_t coord;
 } payload_explosion_end_t;
 typedef struct {
     uint8_t death_id;
 } payload_death_t;
 typedef struct {
-    uint8_t bonus_type;
-    uint16_t bonus_coord;
+    uint8_t type;
+    uint16_t coord;
 } payload_new_bonus_t;
 typedef struct {
     uint8_t player_id;
-    uint16_t bonus_coord;
+    uint16_t coord;
 } payload_bonus_retrieved_t;
 typedef struct {
-    uint16_t block_coord;
+    uint16_t coord;
 } payload_block_destroyed_t;
+
+typedef union {
+    payload_hello_t hello;
+    payload_welcome_t welcome;
+    payload_error_t error;
+    payload_set_status_t set_status;
+    payload_winner_t winner;
+    payload_map_t map;
+    payload_move_attempt_t move_attempt;
+    payload_moved_t moved;
+    payload_bomb_attempt_t bomb_attempt;
+    payload_bomb_t bomb;
+    payload_explosion_start_t explosion_start;
+    payload_explosion_end_t explosion_end;
+    payload_death_t death;
+    payload_new_bonus_t new_bonus;
+    payload_bonus_retrieved_t bonus_retrieved;
+    payload_block_destroyed_t block_destroyed;
+} payload_t;
 
 
 typedef struct {
@@ -129,6 +155,8 @@ typedef struct {
     uint8_t bomb_radius;
     uint16_t bomb_timer_ticks;
     uint16_t speed;
+
+    uint16_t move_ticks;
 } player_t;
 
 typedef struct {
@@ -138,7 +166,6 @@ typedef struct {
     uint16_t col;
     uint8_t radius;
     uint16_t timer_ticks;
-    uint16_t linger;
 } bomb_t;
 
 #define CELL_EMPTY    '.'
