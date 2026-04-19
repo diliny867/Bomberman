@@ -20,8 +20,8 @@
 #define PORT 12345
 
 
-#define OUT_QUEUE_SIZE 1000
-#define SHARED_QUEUE_SIZE  1000
+#define OUT_QUEUE_SIZE     100
+#define SHARED_QUEUE_SIZE  100
 
 typedef struct {
     msg_generic_t header;
@@ -50,8 +50,10 @@ typedef struct {
     player_t players[MAX_PLAYERS];
     int sockets[MAX_PLAYERS];
 
-    int shared_queue_count = 0;
+    int shared_queue_count;
     packet_t shared_queue[SHARED_QUEUE_SIZE];
+
+    int start_timeout;
 } shared_state_t;
 
 shared_state_t *ss;
@@ -86,15 +88,6 @@ static inline int celli_to_id(int i){
 }
 static inline int id_to_celli(int id){
     return id + '1';
-}
-
-void push_payload(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload_t *payload) {
-    if(out_queue_count >= OUT_QUEUE_SIZE) return;
-    out_queue[out_queue_count].header.msg_type  = msg_type;
-    out_queue[out_queue_count].header.sender_id = sender_id;
-    out_queue[out_queue_count].header.target_id = target_id;
-    memcpy(&out_queue[out_queue_count].payload, payload, get_payload_size(msg_type));
-    out_queue_count++;
 }
 
 int get_payload_size(uint8_t type) {
@@ -134,6 +127,21 @@ int get_payload_size(uint8_t type) {
     return 0;
 }
 
+void _push_payload(packet_t *queue, int *queue_count, int max_size, uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload_t *payload, int payload_size) {
+    if(*queue_count >= max_size) return;
+    queue[*queue_count].header.msg_type  = msg_type;
+    queue[*queue_count].header.sender_id = sender_id;
+    queue[*queue_count].header.target_id = target_id;
+    memcpy(&queue[*queue_count].payload, payload, payload_size);
+    (*queue_count)++;
+}
+void push_payload(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload_t *payload) {
+    _push_payload(out_queue, out_queue_count, OUT_QUEUE_SIZE, msg_type, sender_id, target_id, payload, get_payload_size(msg_type));
+}
+void push_shared(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload_t *payload) {
+    _push_payload(shared_queue, shared_queue_count, SHARED_QUEUE_SIZE, msg_type, sender_id, target_id, payload, get_payload_size(msg_type));
+}
+
 // extern int *sockets;
 extern int server_socket;
 void send_packet(packet_t *packet) {
@@ -148,6 +156,15 @@ void send_packet(packet_t *packet) {
     }else {
         write(sockets[packet->header.target_id], packet, size);
     }
+}
+
+void send_error(int target_id, char *text){
+    packet_t packet;
+    packet.header.msg_type = MSG_ERROR;
+    packet.header.sender_id = 255;
+    packet.header.target_id = target_id;
+    packet.payload.error = text;
+    send_packet(packet.header.target_id, packet);
 }
 
 
@@ -266,9 +283,23 @@ void main_loop() {
 
     struct timespec next;
     clock_gettime(CLOCK_MONOTONIC, &next);
+    next.tv_nsec += 1000000000 / TICKS_PER_SECOND;
 
     int i = 0;
     while(1) {
+        if(ss->game_status == GAME_LOBBY) {
+            for(int i = 0; i < ss->player_count; i++){
+                if(ss->start_timeout <= 0){
+                    ss->game_status = GAME_RUNNING;
+                    ss->start_timeout = 0;
+                }else{
+                    ss->start_timeout--;
+                }
+            }
+        }else if(ss->game_status == GAME_END) {
+            continue;
+        }
+
         ss->out_queue_count = 0; // clear out queue
 
         for(int i = 0; i < ss->shared_queue_count; i++){
@@ -296,16 +327,7 @@ void main_loop() {
             case MSG_LEAVE: {
 
             } break;
-            case MSG_ERROR: {
-
-            } break;
-            case MSG_MAP: {
-
-            } break;
             case MSG_SET_READY: {
-
-            } break;
-            case MSG_SET_STATUS: {
 
             } break;
             case MSG_MOVE_ATTEMPT: {
@@ -352,7 +374,8 @@ void main_loop() {
                     push_payload(MSG_BOMB, 255, 254, &p);
                 }
             } break;
-            case MSG_WINNER: case MSG_DEATH: 
+            case MSG_SET_READY: case MSG_SET_STATUS:  
+            case MSG_WINNER: case MSG_DEATH: case MSG_MAP: case MSG_ERROR: 
             case MSG_MOVED: case MSG_BOMB: case MSG_EXPLOSION_START: case MSG_EXPLOSION_END: 
             case MSG_BONUS_AVAILABLE: case MSG_BONUS_RETRIEVED: case MSG_BLOCK_DESTROYED: break; // server dont responds to these 
             }
@@ -364,8 +387,8 @@ void main_loop() {
             send_packet(out_queue[i].header.target_id, out_queue[i].packet);
         }
         
-        next.tv_nsec += 1000000000 / TICKS_PER_SECOND;
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+        next.tv_nsec += 1000000000 / TICKS_PER_SECOND;
     }
 }
 
@@ -373,17 +396,34 @@ void process_client(int id, int socket) {
     printf("Processing client: %d %d\n", id, socket);
     printf("Client count: %d\n", ss->player_count);
 
-    char in[1];
+    uint8_t msg_type, sender_id, target_id;
+    payload_t *payload;
+    char in[sizeof(packet)];
     char out[100];
     while(1) {
-        read(socket, in, 1);
-        // if(in[0] >= '0' && in[0] <= '9') {
-        //     sprintf(out, "Client %d sum: %d\n", id, shared_data[MAX_CLIENTS + id]);
-        //     write(socket, out, strlen(out));
-        //     int num = (int)in[0] - '0';
-        //     printf("Client %d read number: %d\n", id, num);
-        //     shared_data[id] = num;
-        // }
+        read(socket, in, sizeof(packet));
+        msg_type  = in[0];
+        sender_id = in[1];
+        target_id = in[2];
+        payload   = in + 3;
+
+        switch(msg_type){
+        case MSG_SET_READY:
+            ss->players[sender_id].ready = true;
+
+            break;
+        case MSG_SET_STATUS:
+            if(ss->game_status != GAME_END){
+                send_error(sender_id, "wtf?");
+                break;
+            }
+
+            ss->game_status = ((payload_set_status_t*)payload)->game_status;
+
+            break;
+        default: // process all others separately, keeping timeline during tick valid
+            push_shared(msg_type, sender_id, target_id, payload);
+        }
     }
 }
 
@@ -447,6 +487,8 @@ void main_networking() {
 
 void server() {
     make_shared_memory();
+
+    ss->start_timeout = 100;
 
     read_map("main.map", &ss->map_width, &ss->map_height, &ss->map, &ss->player_speed, &ss->bomb_linger_ticks, &ss->bomb_radius, &ss->bomb_timer_ticks);
 
