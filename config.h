@@ -67,14 +67,16 @@ typedef struct {
 typedef struct {
     char version[20];
     uint8_t game_status;
-    uint8_t players_count;
+    uint8_t player_count;
     struct {
         uint8_t ready;
         char name[30];
     } players[MAX_PLAYERS];
+    // } players[];
 } payload_welcome_t; 
 typedef struct {
-    char error[];
+    char *error;
+    // char error[];
 } payload_error_t;
 typedef struct {
     uint8_t game_status;
@@ -114,7 +116,7 @@ typedef struct {
 typedef struct {
     uint8_t type;
     uint16_t coord;
-} payload_new_bonus_t;
+} payload_bonus_available_t;
 typedef struct {
     uint8_t player_id;
     uint16_t coord;
@@ -137,7 +139,7 @@ typedef union {
     payload_explosion_start_t explosion_start;
     payload_explosion_end_t explosion_end;
     payload_death_t death;
-    payload_new_bonus_t new_bonus;
+    payload_bonus_available_t bonus_available;
     payload_bonus_retrieved_t bonus_retrieved;
     payload_block_destroyed_t block_destroyed;
 } payload_t;

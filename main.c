@@ -59,7 +59,8 @@ typedef struct {
     packet_t shared_queue[SHARED_QUEUE_SIZE];
 
     int start_timeout;
-
+    int bonus_timeout;
+    int bonus_count;
 } shared_state_t;
 
 shared_state_t *ss;
@@ -80,8 +81,8 @@ static inline void make_shared_memory() {
 void read_map(char *name) {
     FILE *fin = fopen(name, "r");
 
-    fscanf("%"SCNu8"%"SCNu8, ss->map_width, ss->map_height);
-    fscanf("%"SCNu16"%"SCNu16"%"SCNu8"%"SCNu16, ss->player_speed, ss->bomb_linger_ticks, ss->bomb_radius, ss->bomb_timer_ticks);
+    fscanf(fin, "%"SCNu8"%"SCNu8, &ss->map_width, &ss->map_height);
+    fscanf(fin, "%"SCNu16"%"SCNu16"%"SCNu8"%"SCNu16, &ss->player_speed, &ss->bomb_linger_ticks, &ss->bomb_radius, &ss->bomb_timer_ticks);
 
     int size = ss->map_width * ss->map_height;
     for(int i = 0; i < size;) {
@@ -154,10 +155,10 @@ void _push_payload(packet_t *queue, int *queue_count, int max_size, uint8_t msg_
     (*queue_count)++;
 }
 void push_payload(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload_t *payload) {
-    _push_payload(out_queue, out_queue_count, OUT_QUEUE_SIZE, msg_type, sender_id, target_id, payload, get_payload_size(msg_type));
+    _push_payload(out_queue, &out_queue_count, OUT_QUEUE_SIZE, msg_type, sender_id, target_id, payload, get_payload_size(msg_type));
 }
 void push_shared(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload_t *payload) {
-    _push_payload(shared_queue, shared_queue_count, SHARED_QUEUE_SIZE, msg_type, sender_id, target_id, payload, get_payload_size(msg_type));
+    _push_payload(ss->shared_queue, &ss->shared_queue_count, SHARED_QUEUE_SIZE, msg_type, sender_id, target_id, payload, get_payload_size(msg_type));
 }
 
 // extern int *sockets;
@@ -167,7 +168,7 @@ void send_packet(packet_t *packet) {
     int size = 3 + get_payload_size(packet->header.msg_type);
     if(packet->header.target_id == 254) {
         for(int i = 0; i < MAX_PLAYERS; i++) {
-            if(ss->players[i].id == 0) continue
+            if(ss->players[i].id == 0) continue;
             write(ss->sockets[i], data, size);
         }
     }else if(packet->header.target_id == 255) {
@@ -182,8 +183,8 @@ void send_error(int target_id, char *text) {
     packet.header.msg_type = MSG_ERROR;
     packet.header.sender_id = 255;
     packet.header.target_id = target_id;
-    packet.payload.error = text;
-    send_packet(packet);
+    packet.payload.error.error = text;
+    send_packet(&packet);
 }
 
 void send_simple(int msg_type, int target_id) {
@@ -191,10 +192,10 @@ void send_simple(int msg_type, int target_id) {
     packet.header.msg_type = msg_type;
     packet.header.sender_id = 255;
     packet.header.target_id = target_id;
-    send_packet(packet);
+    send_packet(&packet);
 }
 
-void send_pong(int target_id, bool send_pong) {
+void send_ping(int target_id, bool send_pong) {
     send_simple(send_pong ? MSG_PONG : MSG_PING, target_id);
 }
 
@@ -203,7 +204,7 @@ void change_game_status(uint8_t status) {
     ss->game_status = status;
     payload_set_status_t p;
     p.game_status = status;
-    push_payload(MSG_SET_STATUS, 255, 254, &p);
+    push_payload(MSG_SET_STATUS, 255, 254, (payload_t*)&p);
 }
 
 bomb_t make_bomb(player_t *player) {
@@ -239,6 +240,19 @@ int find_player_slot() {
     return MAX_PLAYERS;
 }
 
+bool cell_empty(int i) {
+    if(ss->map[i] != CELL_EMPTY)
+        return false;
+    for(int i = 0; i < MAX_PLAYERS; i++) {
+        if(ss->players[i].id == 0) continue;
+        player_t *player = ss->players + i;
+        if(GET_I(player->row, player->col, ss->map_width) == i) {
+            return false;
+        }
+    }
+    return true;
+}
+
 
 static inline int clampi_min(int val, int min) {
     return val < min ? min : val;
@@ -263,7 +277,7 @@ bool cell_explode(int x, int y) {
                 payload_explosion_start_t p;
                 p.radius = bj->radius;
                 p.coord = GET_I(bj->row, bj->col, ss->map_width);
-                push_payload(MSG_EXPLOSION_START, 255, 254, &p);
+                push_payload(MSG_EXPLOSION_START, 255, 254, (payload_t*)&p);
 
                 return true;
             }
@@ -274,7 +288,7 @@ bool cell_explode(int x, int y) {
         
         payload_block_destroyed_t p;
         p.coord = i;
-        push_payload(MSG_BLOCK_DESTROYED, 255, 254, &p);
+        push_payload(MSG_BLOCK_DESTROYED, 255, 254, (payload_t*)&p);
 
         
         } return true;
@@ -294,7 +308,7 @@ void tick(){
     if(ss->game_status == GAME_LOBBY){
         int ready_count = 0;
         for(int i = 0; i < MAX_PLAYERS; i++){
-            if(ss->players[i].id == 0) continue
+            if(ss->players[i].id == 0) continue;
             if(!ss->players[i].ready){
                 break;
             }
@@ -308,10 +322,29 @@ void tick(){
         return;
     }
 
+    if(ss->bonus_count < 8) {
+        if(ss->bonus_timeout <= 0) {
+            int size = ss->map_width * ss->map_height;
+            for(int i = 0; i < 5; i++) {
+                int i = rand() % size;
+                if(cell_empty(i)) {
+                    payload_bonus_available_t p;
+                    p.type = 1 + rand() % 3;
+                    p.coord = i;
+                    push_payload(MSG_BONUS_AVAILABLE, 255, 254, (payload_t*)&p);
+                }
+            }
+
+            ss->bonus_timeout = 100;
+        }else {
+            ss->bonus_timeout--;
+        }
+    }
+
     int alive_count = 0;
     int last_id = 0; 
     for(int i = 0; i < MAX_PLAYERS; i++) {
-        if(ss->players[i].id == 0) continue
+        if(ss->players[i].id == 0) continue;
         player_t *player = ss->players + i;
         if(!player->alive) continue;
         alive_count++;
@@ -321,8 +354,8 @@ void tick(){
     }
     if(alive_count == 1) { // also send SET_STATUS ?
         payload_winner_t p;
-        p->id = last_id;
-        push_payload(MSG_WINNER, 255, 254, &p);
+        p.id = last_id;
+        push_payload(MSG_WINNER, 255, 254, (payload_t*)&p);
         change_game_status(GAME_END);
         return;
     }
@@ -332,8 +365,8 @@ void tick(){
         if(bomb->timer_ticks > 0) { // just tick
             bomb->timer_ticks--;
         }else {
+            int bi = GET_I(bomb->row, bomb->col, ss->map_width);
             if(bomb->active) { // delete that bomb
-                int bi = GET_I(bomb->row, bomb->col, ss->map_width);
                 ss->map[bi] = CELL_EMPTY;
                 arr_erase(ss->bombs, i, ss->bombs_count);
                 ss->bombs_count--;
@@ -341,8 +374,8 @@ void tick(){
                 ss->players[pli(bomb->owner_id)].bomb_count--;
 
                 payload_explosion_end_t p;
-                p.bomb_coord = bi;
-                push_payload(MSG_EXPLOSION_END, 255, 254, &p);
+                p.coord = bi;
+                push_payload(MSG_EXPLOSION_END, 255, 254, (payload_t*)&p);
 
                 continue;
             }else {
@@ -351,10 +384,10 @@ void tick(){
 
                 payload_explosion_start_t p;
                 p.radius = bomb->radius;
-                p.bomb_coord = bi;
-                push_payload(MSG_EXPLOSION_START, 255, 254, &p);
+                p.coord = bi;
+                push_payload(MSG_EXPLOSION_START, 255, 254, (payload_t*)&p);
 
-                int row = bomb->row, col = bomb->col, radius = bomb->radius, width = map->map_width, height = ss->map_height;
+                int row = bomb->row, col = bomb->col, radius = bomb->radius, width = ss->map_width, height = ss->map_height;
                 // explode cells in order, also propagate bomb activation to other bombs
                 int xl  = clampi_min(row - radius, 0);
                 int xls = clampi_min(row - 1, 0);
@@ -386,55 +419,44 @@ void tick(){
     }
 }
 
-bool cell_empty(int y) {
-    if(ss->map[i] != CELL_EMPTY)
-        return false;
-    for(int i = 0; i < MAX_PLAYERS; i++){
-        if(ss->players[i].id == 0) continue
-        player_t *player = ss->players + i;
-        if(GET_I(player->row, player->col, ss->map_width) == i) {
-            return false;
-        }
-    }
-    return true;
-}
-
 void handle_game_packets() {
     for(int i = 0; i < ss->shared_queue_count; i++){
         packet_t *packet = ss->shared_queue + i;
         msg_generic_t header = packet->header;
-        payload_t *payload = &packet.payload;
+        payload_t *payload = &packet->payload;
         uint8_t sender_i = pli(header.sender_id);
-        player_t *player = ss->players[sender_i];
+        player_t *player = ss->players + sender_i;
         int x = player->row;
         int y = player->col;
         switch(header.msg_type){
         case MSG_HELLO: {
             payload_hello_t *p = (payload_hello_t*)payload;
             printf("Got client hello from: name: %.30s version: %.20s \n", p->name, p->version);
-            if(ss->player_count < MAX_PLAYERS){
+            if(ss->player_count < MAX_PLAYERS) {
                 ss->players[sender_i] = make_player(header.sender_id, p->name);
-                ss->player_count++
+                ss->player_count++;
             
                 payload_welcome_t welcome;
                 strcpy(welcome.version, VERSION);
                 welcome.game_status = ss->game_status;
                 welcome.player_count = ss->player_count;
                 for(int i = 0; i < MAX_PLAYERS; i++) {
-                    if(ss->players[i].id == 0) continue
+                    if(ss->players[i].id == 0) continue;
                     welcome.players[i].ready = ss->players[i].ready;
                     strcpy(welcome.players[i].name, ss->players[i].name);
                 }
-                push_payload(MSG_WELCOME, 255, header.sender_id, &welcome);
+                push_payload(MSG_WELCOME, 255, header.sender_id, (payload_t*)&welcome);
                 payload_map_t pm;
                 pm.width = ss->map_width;
                 pm.height = ss->map_height;
-                memcpy(pm.map, ss->map);
+                memcpy(pm.map, ss->map, ss->map_width * ss->map_height);
                 for(int i = 0; i < MAX_PLAYERS; i++) {
-                    if(ss->players[i].id == 0) continue
+                    if(ss->players[i].id == 0) continue;
+                    pm.map[GET_I(ss->players[i].row, ss->players[i].col, ss->map_width)] = '1' + i;
                 }
+                push_payload(MSG_MAP, 255, header.sender_id, (payload_t*)&pm);
             }else {
-                push_payload(MSG_DISCONNECT, 255, header.sender_id, NULL);    
+                push_payload(MSG_DISCONNECT, 255, header.sender_id, NULL);
             }
         } break;
         case MSG_LEAVE: {
@@ -481,7 +503,7 @@ void handle_game_packets() {
                     payload_bonus_retrieved_t p;
                     p.player_id = player->id;
                     p.coord = i;
-                    push_payload(MSG_BONUS_RETRIEVED, 255, 254, &p);
+                    push_payload(MSG_BONUS_RETRIEVED, 255, 254, (payload_t*)&p);
                 }
                 // if(ss->map[pi] != CELL_BOMB) {
                 //     ss->map[pi] = CELL_EMPTY;
@@ -490,12 +512,12 @@ void handle_game_packets() {
                 payload_moved_t p;
                 p.player_id = player->id;
                 p.coord = i;
-                push_payload(MSG_MOVED, 255, 254, &p);
+                push_payload(MSG_MOVED, 255, 254, (payload_t*)&p);
             }
         } break;
         case MSG_BOMB_ATTEMPT: {
             if(!player->alive) break;
-            int i = payload->bomb_attempt->coord;
+            int i = payload->bomb_attempt.coord;
             int pi = GET_I(x, y, ss->map_width);
             if(i == pi && player->bomb_count < ss->player_max_bombs) {
                 ss->map[i] = CELL_BOMB;
@@ -505,7 +527,7 @@ void handle_game_packets() {
                 payload_bomb_t p;
                 p.player_id = player->id;
                 p.coord = i;
-                push_payload(MSG_BOMB, 255, 254, &p);
+                push_payload(MSG_BOMB, 255, 254, (payload_t*)&p);
             }
         } break;
         default: break;
@@ -529,7 +551,7 @@ void main_loop() {
 
     int i = 0;
     while(1) {
-        ss->out_queue_count = 0; // clear out queue
+        out_queue_count = 0; // clear out queue
 
         if(ss->game_status == GAME_LOBBY) {
             if(ss->start_timeout <= 0){
@@ -545,7 +567,10 @@ void main_loop() {
         tick();
 
         for(int i = 0; i < out_queue_count; i++){
-            send_packet(out_queue[i].header.target_id, out_queue[i].packet);
+            send_packet(&out_queue[i]);
+            if(out_queue[i].header.msg_type == MSG_DISCONNECT) {
+                close(ss->sockets[pli(out_queue[i].header.target_id)]);
+            }
         }
         
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
@@ -559,7 +584,7 @@ void process_client(int id, int socket) {
 
     int slot = find_player_slot();
     if(slot >= MAX_PLAYERS) {
-        send_simple(MSG_DISCONNECT, id);
+        push_payload(MSG_DISCONNECT, id, 254, NULL);
         return;
     }
     ss->plis[id] = slot;
@@ -567,14 +592,16 @@ void process_client(int id, int socket) {
 
     uint8_t msg_type, sender_id, target_id;
     payload_t *payload;
-    char in[sizeof(packet)];
+    char in[sizeof(packet_t)];
     char out[100];
     while(1) {
-        read(socket, in, sizeof(packet));
+        ssize_t n = read(socket, in, sizeof(packet_t));
+        if(n <= 0) return;
+
         msg_type  = in[0];
         sender_id = in[1];
         target_id = in[2];
-        payload   = in + 3;
+        payload   = (payload_t*)(in + sizeof(msg_generic_t));
 
         switch(msg_type) {
         case MSG_PING:
@@ -649,6 +676,8 @@ void main_networking() {
 
 void server() {
     make_shared_memory();
+
+    srand(time(0));
 
     ss->next_id = 1; // skip id 0
     ss->start_timeout = 100;
