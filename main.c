@@ -24,16 +24,12 @@
 #define SHARED_QUEUE_SIZE  1000
 
 typedef struct {
-    uint8_t type;
+    msg_generic_t header;
     payload_t payload;
 } packet_t;
-typedef struct {
-    msg_generic_t header;
-    packet_t packet;
-} packet_queue_entry_t;
 
 int out_queue_count = 0;
-packet_queue_entry_t out_queue[OUT_QUEUE_SIZE];
+packet_t out_queue[OUT_QUEUE_SIZE];
 
 typedef struct {
     uint8_t game_status;
@@ -55,7 +51,7 @@ typedef struct {
     int sockets[MAX_PLAYERS];
 
     int shared_queue_count = 0;
-    packet_queue_entry_t shared_queue[SHARED_QUEUE_SIZE];
+    packet_t shared_queue[SHARED_QUEUE_SIZE];
 } shared_state_t;
 
 shared_state_t *ss;
@@ -85,8 +81,20 @@ void read_map(char *name, uint8_t *width, uint8_t *height, uint8_t *map,
     fclose(fin);
 }
 
-int id_to_player_i(int id) {
-    return id;
+static inline int celli_to_id(int i){
+    return ss->map[i] - '1';
+}
+static inline int id_to_celli(int id){
+    return id + '1';
+}
+
+void push_payload(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload_t *payload) {
+    if(out_queue_count >= OUT_QUEUE_SIZE) return;
+    out_queue[out_queue_count].header.msg_type  = msg_type;
+    out_queue[out_queue_count].header.sender_id = sender_id;
+    out_queue[out_queue_count].header.target_id = target_id;
+    memcpy(&out_queue[out_queue_count].payload, payload, get_payload_size(msg_type));
+    out_queue_count++;
 }
 
 int get_payload_size(uint8_t type) {
@@ -128,17 +136,17 @@ int get_payload_size(uint8_t type) {
 
 // extern int *sockets;
 extern int server_socket;
-void send_packet(uint8_t target_id, packet_t *packet) {
-    void *data = &packet->type;
-    int size = 1 + get_payload_size(packet->type);
-    if(sender_id == 254) {
+void send_packet(packet_t *packet) {
+    void *data = packet;
+    int size = 1 + get_payload_size(packet->header.msg_type);
+    if(packet->header.target_id == 254) {
         for(int i = 0; i < ss->player_count; i++) {
             write(sockets[i], packet, size);
         }
-    }else if(sender_id == 255) {
+    }else if(packet->header.target_id == 255) {
         write(server_socket, packet, size);
     }else {
-        write(sockets[id_to_player_i(target_id)], packet, size);
+        write(sockets[packet->header.target_id], packet, size);
     }
 }
 
@@ -163,24 +171,49 @@ void cell_explode(int x, int y) {
             if(bj->row == x && bj->col == y && !bj->active) {
                 bj->active = true;
                 bj->timer_ticks = 0;
+
+                payload_explosion_start_t p;
+                p.radius = bj->radius;
+                p.coord = GET_I(bj->row, bj->col, ss->map_width);
+                push_payload(MSG_EXPLOSION_START, 255, 254, &p);
             }
         }
         break;
-    case CELL_SOFT: case CELL_SPEEDUP: case CELL_RADIUSUP: case CELL_TICKUP:
+    case CELL_SOFT: case CELL_SPEEDUP: case CELL_RADIUSUP: case CELL_TICKUP: {
         ss->map[i] = CELL_EMPTY;
-        break; 
+        
+        payload_block_destroyed_t p;
+        p.coord = i;
+        push_payload(MSG_BLOCK_DESTROYED, 255, 254, &p);
+        } break; 
     case '1': case '2': case '3': case '4': case '5': case '6': case '7': case '8': {
-        int id = ss->map[i] - '1';
+        int id = celli_to_id(i);
+
+        payload_death_t p;
+        p.death_id = id;
+        push_payload(MSG_DEATH, 255, 254, &p);
 
         } break;
     }
 }
 
 void tick(){
+    int alive_count = 0;
+    int last_id = 0; 
     for(int i = 0; i < ss->player_count; i++) {
         player_t *player = ss->players + i;
+        if(!player->alive) continue;
+        alive_count++;
+        last_id = player->id;
         if(player->move_ticks > 0)
             player->move_ticks--;
+    }
+    if(alive_count == 1){
+        payload_winner_t p;
+        p->id = last_id;
+        push_payload(MSG_WINNER, 255, 254, &p);
+        ss->game_status = GAME_END;
+        return;
     }
 
     for(int i = 0; i < ss->bombs_count;) {
@@ -189,19 +222,30 @@ void tick(){
             bomb->timer_ticks--;
         }else {
             if(bomb->active) { // delete that bomb
-                ss->map[GET_I(bomb->row, bomb->col, ss->map_width)] = CELL_EMPTY;
+                int bi = GET_I(bomb->row, bomb->col, ss->map_width);
+                ss->map[bi] = CELL_EMPTY;
                 memmove(bombs, bombs + 1, ss->bombs_count - i - 1);
                 ss->bombs_count--;
+
+                payload_explosion_end_t p;
+                p.bomb_coord = bi;
+                push_payload(MSG_EXPLOSION_END, 255, 254, &p);
+
                 continue;
             }else {
                 bomb->active = true;
-                bomb->timer_ticks = ss->players[id_to_player_i(bomb->owner_id)].bomb_timer_ticks;
+                bomb->timer_ticks = ss->players[bomb->owner_id].bomb_timer_ticks;
+
+                payload_explosion_start_t p;
+                p.radius = bomb->radius;
+                p.bomb_coord = bi;
+                push_payload(MSG_EXPLOSION_START, 255, 254, &p);
 
                 // explode cells, also propagate bomb activation to other bombs
-                int xs = clampi_min(bomb->row - bomb->radius, 0);
-                int xf = clampi_max(bomb->row + bomb->radius, ss->map_width - 1);
-                int ys = clampi_min(bomb->col - bomb->radius, 0);
-                int yf = clampi_max(bomb->col + bomb->radius, ss->map_height - 1);
+                int xs = clampi_min((int)bomb->row - (int)bomb->radius, 0);
+                int xf = clampi_max((int)bomb->row + (int)bomb->radius, (int)ss->map_width - 1);
+                int ys = clampi_min((int)bomb->col - (int)bomb->radius, 0);
+                int yf = clampi_max((int)bomb->col + (int)bomb->radius, (int)ss->map_height - 1);
                 for(int x = xs; x < xf; x++) {
                     if(x == bomb->row) continue;
                     cell_explode(x, bomb->col);
@@ -214,9 +258,9 @@ void tick(){
         }
         i++;
     }
-
 }
 
+// process input queue from clients -> tick -> send output queue to clients
 void main_loop() {
     printf("Loop:\n");
 
@@ -225,6 +269,94 @@ void main_loop() {
 
     int i = 0;
     while(1) {
+        ss->out_queue_count = 0; // clear out queue
+
+        for(int i = 0; i < ss->shared_queue_count; i++){
+            packet_t *packet = ss->shared_queue + i;
+            payload_t *payload = &packet.payload;
+            player_t *player = ss->players[packet->sender_id];
+            int x = player->row;
+            int y = player->col;
+            switch(packet->msg_type){
+            case MSG_HELLO: {
+
+            } break;
+            case MSG_WELCOME: {
+
+            } break;
+            case MSG_DISCONNECT: {
+
+            } break;
+            case MSG_PING: {
+
+            } break;
+            case MSG_PONG: {
+
+            } break;
+            case MSG_LEAVE: {
+
+            } break;
+            case MSG_ERROR: {
+
+            } break;
+            case MSG_MAP: {
+
+            } break;
+            case MSG_SET_READY: {
+
+            } break;
+            case MSG_SET_STATUS: {
+
+            } break;
+            case MSG_MOVE_ATTEMPT: {
+                if(player->move_ticks > 0 || !player->alive) 
+                    break;
+
+                uint8_t dir = payload->move_attempt.direction;
+                int xd = x + (dir == DIR_RIGHT) - (dir == DIR_LEFT); 
+                int yd = y - (dir == DIR_UP) + (dir == DIR_DOWN);
+                if(xd < 0 || xd >= ss->map_width || yd < 0 || yd >= ss->map_height) 
+                    break;
+
+                int i = GET_I(xd, yd, ss->map_width);
+                int pi = GET_I(x, y, ss->map_width);
+                if(ss->map[i] == CELL_EMPTY) {
+                    ss->map[i] = id_to_celli(player->id);
+                    uint8_t cell = ss->map[i];
+                    if(cell == CELL_SPEEDUP || cell == CELL_RADIUSUP || cell == CELL_TICKUP){
+                        payload_bonus_retrieved_t p;
+                        p.player_id = player->id;
+                        p.coord = i;
+                        push_payload(MSG_BONUS_RETRIEVED, 255, 254, &p);
+                    }
+                    if(ss->map[pi] != CELL_BOMB) {
+                        ss->map[pi] = CELL_EMPTY;
+                    }
+
+                    payload_moved_t p;
+                    p.player_id = player->id;
+                    p.coord = i;
+                    push_payload(MSG_MOVED, 255, 254, &p);
+                }
+            } break;
+            case MSG_BOMB_ATTEMPT: {
+                if(!player->alive) break;
+                int i = payload->bomb_attempt->coord;
+                int pi = GET_I(x, y, ss->map_width);
+                if(celli_to_id(i) == player->id) {
+                    ss->map[i] = CELL_BOMB;
+
+                    payload_bomb_t p;
+                    p.player_id = player->id;
+                    p.coord = i;
+                    push_payload(MSG_BOMB, 255, 254, &p);
+                }
+            } break;
+            case MSG_WINNER: case MSG_DEATH: 
+            case MSG_MOVED: case MSG_BOMB: case MSG_EXPLOSION_START: case MSG_EXPLOSION_END: 
+            case MSG_BONUS_AVAILABLE: case MSG_BONUS_RETRIEVED: case MSG_BLOCK_DESTROYED: break; // server dont responds to these 
+            }
+        }
 
         tick();
 
