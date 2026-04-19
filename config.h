@@ -1,6 +1,10 @@
 
+#pragma once
+
+#define _GNU_SOURCE
 #include <stdint.h>
 #include <stdbool.h>
+#include <inttypes.h>
 
 #define MAX_PLAYERS 8
 #define TICKS_PER_SECOND 20
@@ -177,3 +181,8 @@ typedef struct {
 #define CELL_SPEEDUP  'A'
 #define CELL_RADIUSUP 'R'
 #define CELL_TICKUP   'T'
+
+typedef struct {
+    msg_generic_t header;
+    payload_t payload;
+} packet_t;
