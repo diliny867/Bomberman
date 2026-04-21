@@ -13,6 +13,47 @@
 #include <arpa/inet.h>
 
 
+#define OUT_QUEUE_SIZE     100
+#define SHARED_QUEUE_SIZE  100
+
+typedef struct {
+    uint8_t game_status;
+
+    uint16_t player_speed;
+    uint16_t bomb_linger_ticks;
+    uint8_t bomb_radius;
+    uint16_t bomb_timer_ticks;
+    uint8_t player_max_bombs;
+
+    uint8_t map_width;
+    uint8_t map_height;
+    uint8_t map[MAP_SIZE_MAX];
+    uint16_t start_coords[MAX_PLAYERS];
+
+    uint16_t bombs_count;
+    bomb_t bombs[MAP_SIZE_MAX];
+
+    uint16_t player_count;
+    player_t players[MAX_PLAYERS];
+    int sockets[MAX_PLAYERS];
+
+    uint8_t plis[256];
+    uint8_t next_id;
+
+    int shared_queue_count;
+    packet_t shared_queue[SHARED_QUEUE_SIZE];
+
+    int start_timeout;
+    int bonus_timeout;
+    int bonus_count;
+} shared_state_t;
+
+static shared_state_t *ss;
+
+static int out_queue_count = 0;
+static packet_t out_queue[OUT_QUEUE_SIZE];
+
+
 static inline void make_shared_memory() {
     ss = mmap(NULL, sizeof(shared_state_t), PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS, -1, 0);
 }
@@ -41,54 +82,6 @@ void read_map(char *name) {
     fclose(fin);
 }
 
-int get_payload_size(uint8_t type) {
-    if(type == MSG_HELLO) {
-        return sizeof(payload_hello_t);
-    }else if(type == MSG_WELCOME) {
-        return sizeof(payload_welcome_t);
-    }else if(type == MSG_ERROR) {
-        return sizeof(payload_error_t);
-    }else if(type == MSG_SET_STATUS) {
-        return sizeof(payload_set_status_t);
-    }else if(type == MSG_WINNER) {
-        return sizeof(payload_winner_t);
-    }else if(type == MSG_MAP) {
-        return sizeof(payload_map_t);
-    }else if(type == MSG_MOVE_ATTEMPT) {
-        return sizeof(payload_move_attempt_t);
-    }else if(type == MSG_MOVED) {
-        return sizeof(payload_moved_t);
-    }else if(type == MSG_BOMB_ATTEMPT) {
-        return sizeof(payload_bomb_attempt_t);
-    }else if(type == MSG_BOMB) {
-        return sizeof(payload_bomb_t);
-    }else if(type == MSG_EXPLOSION_START) {
-        return sizeof(payload_explosion_start_t);
-    }else if(type == MSG_EXPLOSION_END) {
-        return sizeof(payload_explosion_end_t);
-    }else if(type == MSG_DEATH) {
-        return sizeof(payload_death_t);
-    }else if(type == MSG_BONUS_AVAILABLE) {
-        return sizeof(payload_bonus_available_t);
-    }else if(type == MSG_BONUS_RETRIEVED) {
-        return sizeof(payload_bonus_retrieved_t);
-    }else if(type == MSG_BLOCK_DESTROYED) {
-        return sizeof(payload_block_destroyed_t);
-    }    
-    return 0;
-}
-
-
-int clampi_min(int val, int min) {
-    return val < min ? min : val;
-}
-int clampi_max(int val, int max) {
-    return val > max ? max : val;
-}
-int clampi(int val, int min, int max) {
-    return clampi_max(clampi_min(val, min), max);
-}
-
 
 void _push_payload(packet_t *queue, int *queue_count, int max_size, uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload_t *payload, int payload_size) {
     if(*queue_count >= max_size) return;
@@ -106,20 +99,20 @@ void push_shared(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload
     _push_payload(ss->shared_queue, &ss->shared_queue_count, SHARED_QUEUE_SIZE, msg_type, sender_id, target_id, payload, get_payload_size(msg_type));
 }
 
-// extern int *sockets;
-// extern int server_socket;
-void send_packet(packet_t *packet) {
+
+void send_packet_simple(int socket, packet_t *packet) {
     void *data = packet;
     int size = 3 + get_payload_size(packet->header.msg_type);
+    write(socket, data, size);
+}
+void send_packet(packet_t *packet) {
     if(packet->header.target_id == 254) {
         for(int i = 0; i < MAX_PLAYERS; i++) {
             if(ss->players[i].id == 0) continue;
-            write(ss->sockets[i], data, size);
+            send_packet_simple(ss->sockets[i], packet);
         }
-    }else if(packet->header.target_id == 255) {
-        // write(server_socket, data, size);
     }else {
-        write(ss->sockets[pli(packet->header.target_id)], data, size);
+        send_packet_simple(ss->sockets[pli(packet->header.target_id)], packet);
     }
 }
 
@@ -130,18 +123,6 @@ void send_error(int target_id, char *text) {
     packet.header.target_id = target_id;
     packet.payload.error.error = text;
     send_packet(&packet);
-}
-
-void send_simple(int msg_type, int target_id) {
-    packet_t packet;
-    packet.header.msg_type = msg_type;
-    packet.header.sender_id = 255;
-    packet.header.target_id = target_id;
-    send_packet(&packet);
-}
-
-void send_ping(int target_id, bool send_pong) {
-    send_simple(send_pong ? MSG_PONG : MSG_PING, target_id);
 }
 
 void change_game_status(uint8_t status) {
@@ -466,7 +447,7 @@ void handle_game_packets() {
             }
         } break;
         default: break;
-        // case MSG_WELCOME: case MSG_DISCONNECT: case MSG_PING: case MSG_PONG: 
+        // case MSG_WELCOME: case MSG_DISCONNECT:
         // case MSG_WINNER: case MSG_DEATH: case MSG_MAP: case MSG_ERROR: 
         // case MSG_MOVED: case MSG_BOMB: case MSG_EXPLOSION_START: case MSG_EXPLOSION_END: 
         // case MSG_BONUS_AVAILABLE: case MSG_BONUS_RETRIEVED: case MSG_BLOCK_DESTROYED: break; // server dont responds to these 
@@ -527,10 +508,9 @@ void process_client(int id, int socket) {
 
     uint8_t msg_type, sender_id, target_id;
     payload_t *payload;
-    char in[sizeof(packet_t)];
-    char out[100];
+    uint8_t in[sizeof(packet_t)];
     while(1) {
-        ssize_t n = read(socket, in, sizeof(packet_t));
+        ssize_t n = recv(socket, in, sizeof(packet_t), MSG_WAITALL);
         if(n <= 0) return;
         printf("Read from client %d %ld bytes\n", id, n);
 
@@ -542,10 +522,10 @@ void process_client(int id, int socket) {
 
         switch(msg_type) {
         case MSG_PING:
-            send_ping(sender_id, true);
+            send_ping(pli(sender_id), sender_id, 255, true);
             break;
         case MSG_PONG:
-            pings[sender_id == 255 ? MAX_PLAYERS : pli(sender_id)] = 0;
+            pings[pli(sender_id)] = 0;
             break;
         default: // process all others separately, keeping timeline during tick valid
             push_shared(msg_type, sender_id, target_id, payload);
@@ -620,6 +600,7 @@ void server() {
     ss->start_timeout = 100;
     ss->player_max_bombs = 1;
     ss->game_status = GAME_LOBBY;
+    ss->plis[255] = 255;
 
     read_map("main.map");
 

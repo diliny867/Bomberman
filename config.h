@@ -186,3 +186,29 @@ typedef struct {
     msg_generic_t header;
     payload_t payload;
 } packet_t;
+
+// useful and common(for client and server) functions/variables
+extern int pings[256];
+
+#define GET_I(x, y, width) ((y) * (width) + (x))
+#define pli(id) ss->plis[(id)]
+
+#define celli_to_i(i)   (ss->map[i] - '1')
+#define id_to_celli(id) (pli(id) + '1')
+
+#define arr_erase(arr, i, count) memmove((arr), (arr) + 1, ((count) - (i) - 1) * sizeof(arr[0]))
+
+int clampi_min(int val, int min);
+int clampi_max(int val, int max);
+int clampi(int val, int min, int max);
+
+int get_payload_size(uint8_t type);
+
+void send_packet_simple(int socket, packet_t *packet) {
+    void *data = packet;
+    int size = 3 + get_payload_size(packet->header.msg_type);
+    write(socket, data, size);
+}
+
+void send_simple(int socket, uint8_t msg_type, uint8_t sender_id, uint8_t target_id);
+void send_ping(int socket, uint8_t target_id, uint8_t sender_id, bool send_pong);

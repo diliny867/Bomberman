@@ -3,4 +3,4 @@
 #include "config.h"
 
 
-void client();
+void client(const char *ip, int port);
