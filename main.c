@@ -8,18 +8,24 @@
 int main(int argc, char **argv) {
 
     if(argc > 1 && argv[1][0] == '-' && argv[1][1] == 's') {
-        server();
+        int port = PORT;
+        if(argc > 2)
+            port = atoi(argv[2]);
+        server(port);
     } else {
         // default values
-        const char *ip = "127.0.0.1";
+        char *name = NULL;
+        char *ip = "127.0.0.1";
         int port = PORT;
 
-        if(argc >= 3) {
+        if(argc > 1)
             ip = argv[1];
+        if(argc > 2)
             port = atoi(argv[2]);
-        }
+        if(argc > 3)
+            name = argv[3];
 
-        client(ip, port);
+        client(name, ip, port);
     }
 
     return 0;

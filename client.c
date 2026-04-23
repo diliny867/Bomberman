@@ -6,15 +6,16 @@
 #include <string.h>
 #include <unistd.h>
 #include <assert.h>
+#include <time.h>
 #include <arpa/inet.h>
 
 
-uint8_t my_id = 0;
-int server_socket = 0;
+static uint8_t my_id = 0;
+static int server_socket = 0;
 
-uint8_t map_width = 0;
-uint8_t map_height = 0;
-uint8_t map[MAP_SIZE_MAX];
+static uint8_t map_width = 0;
+static uint8_t map_height = 0;
+static uint8_t map[MAP_SIZE_MAX];
 
 
 int handle_packet(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload_t *payload) {
@@ -93,58 +94,95 @@ int handle_packet(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payloa
     return 0;
 }
 
+void random_str(char *name, int count) {
+    assert(count < 30);
+    name[count] = '\0';
+    for(int i = 0; i < count; i++) {
+        name[i] = '0' + rand() % ('z' - '0');
+    }
+}
 
-void client(const char *ip, int port) {
+void client(char *name, char *ip, int port) {
+    srand(time(0));
+
+    char _tmp_name[30];
+    if(name == NULL) {
+        name = _tmp_name;
+        random_str(name, 20);
+    }
+
+    log("name: %s version: %s\n", name, VERSION);
+
     struct sockaddr_in server_addr;
 
     // 1. Create socket
     server_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
+    if (server_socket < 0) {
         perror("socket");
         return;
     }
 
     // 2. Setup address
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(PORT);
+    server_addr.sin_port = htons(port);
 
     if (inet_pton(AF_INET, ip, &server_addr.sin_addr) <= 0) {
         perror("inet_pton");
-        close(sock);
+        close(server_socket);
         return;
     }
 
     // 3. Connect
-    if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+    if (connect(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("connect");
-        close(sock);
+        close(server_socket);
         return;
     }
 
-    printf("Connected to server %s:%d\n", ip, port);
+    log("Connected to server %s:%d\n", ip, port);
 
-    send_simple(server_socket, MSG_HELLO, my_id, 255);
+    packet_t p;
+    p.header = make_header(MSG_HELLO, my_id, 255);
+    strcpy(p.payload.hello.version, VERSION);
+    strcpy(p.payload.hello.name, name);
+    send_packet_simple(server_socket, &p);
 
     uint8_t msg_type, sender_id, target_id;
     payload_t *payload;
-    assert(1024 >= sizeof(packet_t));
-    char in[1024]; // Something bad will happen on too long error text
+    assert(sizeof(packet_t) <= 100000);
+    char in[100000]; // Something bad will happen on too long error text
     // 4. Receive loop
     while (1) {
-        ssize_t n = recv(sock, in, sizeof(in), MSG_WAITALL);
+        // Handle Input
+
+        
+
+
+        // wait for socket or timeouts
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(server_socket, &rfds);
+        struct timeval tv = { .tv_sec = 0, .tv_usec = 1000 };
+        int ready = select(server_socket + 1, &rfds, NULL, NULL, &tv);
+        if (ready < 0) return;
+        if (ready == 0) continue;  // timeout
+
+
+        log("Client read:\n");
+        ssize_t n = read(server_socket, in, sizeof(in));
         if (n <= 0) break;
+        log("Read from server %ld bytes\n", n);
 
         msg_type  = in[0];
         sender_id = in[1];
         target_id = in[2];
         payload   = (payload_t*)(in + sizeof(msg_generic_t));
-        printf("msg_type: %hhu sender_id: %hhu target_id: %hhu\n", msg_type, sender_id, target_id);
+        log("msg_type: %hhu sender_id: %hhu target_id: %hhu\n", msg_type, sender_id, target_id);
 
         if(handle_packet(msg_type, sender_id, target_id, payload)) break;
-
-        // Handle Input
-
     }
 
-    close(sock);
+    log("Client exit\n");
+
+    close(server_socket);
 }

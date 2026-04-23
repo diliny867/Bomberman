@@ -6,6 +6,14 @@
 #include <stdbool.h>
 #include <inttypes.h>
 
+
+#define PORT 12344
+#define VERSION "aboba1"
+
+//#define log(format, ...) printf(format __VA_OPT__(,) __VA_ARGS__)
+#define log(...) printf(__VA_ARGS__)
+// #define log(...) 
+
 #define MAX_PLAYERS 8
 #define TICKS_PER_SECOND 20
 
@@ -79,8 +87,8 @@ typedef struct {
     // } players[];
 } payload_welcome_t; 
 typedef struct {
-    char *error;
-    // char error[];
+    //char *error;
+    char error[];
 } payload_error_t;
 typedef struct {
     uint8_t game_status;
@@ -185,7 +193,7 @@ typedef struct {
 typedef struct {
     msg_generic_t header;
     payload_t payload;
-} packet_t;
+} __attribute__((packed)) packet_t;
 
 // useful and common(for client and server) functions/variables
 extern int pings[256];
@@ -202,13 +210,13 @@ int clampi_min(int val, int min);
 int clampi_max(int val, int max);
 int clampi(int val, int min, int max);
 
+void dump_bytes(void *data, int size);
+
+msg_generic_t make_header(uint8_t msg_type, uint8_t sender_id, uint8_t target_id);
+
 int get_payload_size(uint8_t type);
 
-void send_packet_simple(int socket, packet_t *packet) {
-    void *data = packet;
-    int size = 3 + get_payload_size(packet->header.msg_type);
-    write(socket, data, size);
-}
+void send_packet_simple(int socket, packet_t *packet);
 
 void send_simple(int socket, uint8_t msg_type, uint8_t sender_id, uint8_t target_id);
 void send_ping(int socket, uint8_t target_id, uint8_t sender_id, bool send_pong);

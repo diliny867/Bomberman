@@ -13,8 +13,14 @@
 #include <arpa/inet.h>
 
 
-#define OUT_QUEUE_SIZE     100
-#define SHARED_QUEUE_SIZE  100
+#define OUT_QUEUE_SLOT_SIZE (1000 / MAX_PLAYERS)
+#define SHARED_QUEUE_SIZE   1000
+
+typedef struct {
+    packet_t data[OUT_QUEUE_SLOT_SIZE];
+    int count;
+    int start;
+} out_queue_slot_t;
 
 typedef struct {
     uint8_t game_status;
@@ -40,8 +46,13 @@ typedef struct {
     uint8_t plis[256];
     uint8_t next_id;
 
-    int shared_queue_count;
+    // ring buffer
     packet_t shared_queue[SHARED_QUEUE_SIZE];
+    int shared_queue_count;
+    int shared_queue_start;
+
+    // ring buffer
+    out_queue_slot_t out_queue[MAX_PLAYERS];
 
     int start_timeout;
     int bonus_timeout;
@@ -49,9 +60,6 @@ typedef struct {
 } shared_state_t;
 
 static shared_state_t *ss;
-
-static int out_queue_count = 0;
-static packet_t out_queue[OUT_QUEUE_SIZE];
 
 
 static inline void make_shared_memory() {
@@ -83,28 +91,34 @@ void read_map(char *name) {
 }
 
 
-void _push_payload(packet_t *queue, int *queue_count, int max_size, uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload_t *payload, int payload_size) {
-    if(*queue_count >= max_size) return;
-    queue[*queue_count].header.msg_type  = msg_type;
-    queue[*queue_count].header.sender_id = sender_id;
-    queue[*queue_count].header.target_id = target_id;
+void _push_payload(packet_t *queue, int *queue_count, int *start, int max_size, uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload_t *payload, int payload_size) {
+    if(*queue_count >= max_size) {
+        log("Queue of size %d is filled, dropping packet type %hhu from %hhu to %hhu\n", max_size, msg_type, sender_id, target_id);
+        return;
+    }
+    int index = (*start + *queue_count) % max_size;
+    queue[index].header = make_header(msg_type, sender_id, target_id);
     if(payload)
-        memcpy(&queue[*queue_count].payload, payload, payload_size);
+        memcpy(&queue[index].payload, payload, payload_size);
     (*queue_count)++;
 }
 void push_payload(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload_t *payload) {
-    _push_payload(out_queue, &out_queue_count, OUT_QUEUE_SIZE, msg_type, sender_id, target_id, payload, get_payload_size(msg_type));
+    log("Pushing %d %d\n", msg_type, pli(target_id));
+    if(target_id == 254){
+        for(int i = 0; i < MAX_PLAYERS; i++) {
+            if(ss->players[i].id == 0) continue;
+            _push_payload(ss->out_queue[i].data, &ss->out_queue[i].count, &ss->out_queue[i].start, OUT_QUEUE_SLOT_SIZE, msg_type, sender_id, target_id, payload, get_payload_size(msg_type));
+        }
+    }else {
+        int id = pli(target_id);
+        _push_payload(ss->out_queue[id].data, &ss->out_queue[id].count, &ss->out_queue[id].start, OUT_QUEUE_SLOT_SIZE, msg_type, sender_id, target_id, payload, get_payload_size(msg_type));
+    }
 }
 void push_shared(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload_t *payload) {
-    _push_payload(ss->shared_queue, &ss->shared_queue_count, SHARED_QUEUE_SIZE, msg_type, sender_id, target_id, payload, get_payload_size(msg_type));
+    _push_payload(ss->shared_queue, &ss->shared_queue_count, &ss->shared_queue_start, SHARED_QUEUE_SIZE, msg_type, sender_id, target_id, payload, get_payload_size(msg_type));
 }
 
 
-void send_packet_simple(int socket, packet_t *packet) {
-    void *data = packet;
-    int size = 3 + get_payload_size(packet->header.msg_type);
-    write(socket, data, size);
-}
 void send_packet(packet_t *packet) {
     if(packet->header.target_id == 254) {
         for(int i = 0; i < MAX_PLAYERS; i++) {
@@ -112,16 +126,15 @@ void send_packet(packet_t *packet) {
             send_packet_simple(ss->sockets[i], packet);
         }
     }else {
+        log("In sendpacket %d\n", ss->sockets[pli(packet->header.target_id)]);
         send_packet_simple(ss->sockets[pli(packet->header.target_id)], packet);
     }
 }
 
 void send_error(int target_id, char *text) {
     packet_t packet;
-    packet.header.msg_type = MSG_ERROR;
-    packet.header.sender_id = 255;
-    packet.header.target_id = target_id;
-    packet.payload.error.error = text;
+    packet.header = make_header(MSG_ERROR, 255, target_id);
+    strcpy(packet.payload.error.error, text);
     send_packet(&packet);
 }
 
@@ -221,7 +234,10 @@ bool cell_explode(int x, int y) {
 }
 
 void tick(){
+    //log("Tick\n");
+
     if(ss->game_status == GAME_LOBBY){
+        return;
         int ready_count = 0;
         for(int i = 0; i < MAX_PLAYERS; i++){
             if(ss->players[i].id == 0) continue;
@@ -232,7 +248,6 @@ void tick(){
         }
         if(ready_count == ss->player_count){
             change_game_status(GAME_RUNNING);
-
         }
     }else if(ss->game_status != GAME_RUNNING) {
         return;
@@ -247,7 +262,9 @@ void tick(){
                     payload_bonus_available_t p;
                     p.type = 1 + rand() % 3;
                     p.coord = i;
+                    ss->bonus_count++;
                     push_payload(MSG_BONUS_AVAILABLE, 255, 254, (payload_t*)&p);
+                    break;
                 }
             }
 
@@ -336,8 +353,14 @@ void tick(){
 }
 
 void handle_game_packets() {
-    for(int i = 0; i < ss->shared_queue_count; i++){
-        packet_t *packet = ss->shared_queue + i;
+    int count = ss->shared_queue_count;
+    int start = ss->shared_queue_start;
+    // clear ring buffer
+    ss->shared_queue_count = 0;
+    ss->shared_queue_start = (ss->shared_queue_start + ss->shared_queue_count) % SHARED_QUEUE_SIZE;
+    for(int i = 0; i < count; i++){
+        int index = (start + i) % SHARED_QUEUE_SIZE;
+        packet_t *packet = ss->shared_queue + index;
         msg_generic_t header = packet->header;
         payload_t *payload = &packet->payload;
         uint8_t sender_i = pli(header.sender_id);
@@ -347,7 +370,8 @@ void handle_game_packets() {
         switch(header.msg_type){
         case MSG_HELLO: {
             payload_hello_t *p = (payload_hello_t*)payload;
-            printf("Got client hello from: name: %.30s version: %.20s \n", p->name, p->version);
+            log("Got client hello from: name: %.30s version: %.20s\n", p->name, p->version);
+            // dump_bytes(packet, 53);
             if(ss->player_count < MAX_PLAYERS) {
                 ss->players[sender_i] = make_player(header.sender_id, p->name);
                 ss->player_count++;
@@ -454,12 +478,12 @@ void handle_game_packets() {
         }
     }
 
-    ss->shared_queue_count = 0; // clear packet queue, we handled them all
+    // ss->shared_queue_count = 0; // clear packet queue, we handled them all
 }
 
 // process input queue from clients -> tick -> send output queue to clients
 void main_loop() {
-    printf("Loop:\n");
+    log("Loop:\n");
 
     struct timespec next;
     clock_gettime(CLOCK_MONOTONIC, &next);
@@ -467,27 +491,27 @@ void main_loop() {
 
     int i = 0;
     while(1) {
-        out_queue_count = 0; // clear out queue
-
-        if(ss->game_status == GAME_LOBBY) {
-            if(ss->start_timeout <= 0){
-                change_game_status(GAME_RUNNING);
-                ss->start_timeout = 0;
-            }else{
-                ss->start_timeout--;
-            }
-        }
+        // if(ss->game_status == GAME_LOBBY) {
+        //     if(ss->start_timeout <= 0){
+        //         change_game_status(GAME_RUNNING);
+        //         ss->start_timeout = 0;
+        //     }else{
+        //         ss->start_timeout--;
+        //     }
+        // }
 
         handle_game_packets();
 
         tick();
 
-        for(int i = 0; i < out_queue_count; i++){
-            send_packet(&out_queue[i]);
-            if(out_queue[i].header.msg_type == MSG_DISCONNECT) {
-                close(ss->sockets[pli(out_queue[i].header.target_id)]);
-            }
-        }
+        // for(int i = 0; i < out_queue_count; i++){
+        //     log("Sending: %d\n", out_queue[i].header.msg_type);
+        //     send_packet(&out_queue[i]);
+        //     if(out_queue[i].header.msg_type == MSG_DISCONNECT) {
+        //         close(ss->sockets[pli(out_queue[i].header.target_id)]);
+        //     }
+        // }
+        // out_queue_count = 0; // clear out queue
         
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
         next.tv_nsec += 1000000000 / TICKS_PER_SECOND;
@@ -495,34 +519,64 @@ void main_loop() {
 }
 
 void process_client(int id, int socket) {
-    printf("Processing client: %d %d\n", id, socket);
-    printf("Client count: %d\n", ss->player_count);
+    log("Processing client: %d %d\n", id, socket);
+    log("Client count: %d\n", ss->player_count);
 
     int slot = find_player_slot();
     if(slot >= MAX_PLAYERS) {
-        push_payload(MSG_DISCONNECT, id, 254, NULL);
+        push_payload(MSG_DISCONNECT, 255, id, NULL);
         return;
     }
     ss->plis[id] = slot;
     ss->sockets[slot] = socket;
 
+    log("Socket: %d %d %d\n", socket, ss->sockets[slot], slot);
+
     uint8_t msg_type, sender_id, target_id;
     payload_t *payload;
     uint8_t in[sizeof(packet_t)];
     while(1) {
-        ssize_t n = recv(socket, in, sizeof(packet_t), MSG_WAITALL);
+        packet_t *queue_data = ss->out_queue[slot].data;
+        int      queue_start = ss->out_queue[slot].start;
+        int      queue_count = ss->out_queue[slot].count;
+        // clear read part of ring buffer
+        ss->out_queue[slot].count = 0;
+        ss->out_queue[slot].start = (queue_start + queue_count) % OUT_QUEUE_SLOT_SIZE;
+        for(int i = 0; i < queue_count; i++){
+            int index = (queue_start + i) % OUT_QUEUE_SLOT_SIZE;
+            log("Sending: %d\n", queue_data[index].header.msg_type);
+            send_packet(&queue_data[index]);
+            if(queue_data[index].header.msg_type == MSG_DISCONNECT) {
+                close(ss->sockets[pli(queue_data[index].header.target_id)]);
+            }
+        }
+
+
+        // wait for socket or timeouts
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(socket, &rfds);
+        struct timeval tv = { .tv_sec = 0, .tv_usec = 1000 };
+        int ready = select(socket + 1, &rfds, NULL, NULL, &tv);
+        if (ready < 0) return;
+        if (ready == 0) continue;  // timeout
+
+
+        log("Server read:\n");
+        ssize_t n = read(socket, in, sizeof(in));
         if(n <= 0) return;
-        printf("Read from client %d %ld bytes\n", id, n);
+        log("Read from client %d %ld bytes\n", id, n);
 
         msg_type  = in[0];
-        sender_id = in[1];
+        //sender_id = in[1];
+        sender_id = id;
         target_id = in[2];
         payload   = (payload_t*)(in + sizeof(msg_generic_t));
-        printf("msg_type: %hhu sender_id: %hhu target_id: %hhu\n", msg_type, sender_id, target_id);
+        log("msg_type: %hhu sender_id: %hhu target_id: %hhu\n", msg_type, sender_id, target_id);
 
         switch(msg_type) {
         case MSG_PING:
-            send_ping(pli(sender_id), sender_id, 255, true);
+            send_ping(ss->sockets[pli(sender_id)], sender_id, 255, true);
             break;
         case MSG_PONG:
             pings[pli(sender_id)] = 0;
@@ -533,7 +587,7 @@ void process_client(int id, int socket) {
     }
 }
 
-void main_networking() {
+void main_networking(int port) {
     int main_socket;
     struct sockaddr_in server_address;
     int client_socket;
@@ -542,31 +596,32 @@ void main_networking() {
 
     main_socket = socket(AF_INET, SOCK_STREAM, 0);
     if(main_socket < 0) {
-        printf("Error opening server socket\n");
+        log("Error opening server socket\n");
         exit(1);
     }
-    printf("Server socket created\n");
+    log("Server socket created\n");
 
     server_address.sin_family = AF_INET;
     server_address.sin_addr.s_addr = INADDR_ANY;
-    server_address.sin_port = htons(PORT);
+    server_address.sin_port = htons(port);
 
     if(bind(main_socket, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
-        printf("Error binding server socket\n");
+        log("Error binding server socket\n");
+        close(main_socket);
         exit(1);
     }
-    printf("Server socket binded\n");
+    log("Server socket binded\n");
 
     if(listen(main_socket, MAX_PLAYERS) < 0) {
-        printf("Error listening to server socket\n");
+        log("Error listening to server socket\n");
         exit(1);
     }
-    printf("Listening to server socket\n");
+    log("Listening to server socket\n");
 
     while(1) {
         client_socket = accept(main_socket, (struct sockaddr*)&client_address, &client_address_size);
         if(client_socket < 0) {
-            printf("Error accepting client: %d\n", errno);
+            log("Error accepting client: %d\n", errno);
             continue;
         }
 
@@ -578,23 +633,24 @@ void main_networking() {
             cpid = fork();
             if(cpid == 0) {
                 process_client(new_client_id, client_socket);
+                log("Ended processing client %d\n", new_client_id);
                 exit(0);
             }else{
                 wait(NULL);
-                printf("Orphaned client: %d\n", new_client_id);
+                log("Orphaned client: %d\n", new_client_id);
                 exit(0);
             }
         }else{
-            close(client_socket);
+            // close(client_socket);
         }
     }
 
 }
 
-void server() {
-    make_shared_memory();
-
+void server(int port) {
     srand(time(0));
+
+    make_shared_memory();
 
     ss->next_id = 1; // skip id 0
     ss->start_timeout = 100;
@@ -606,7 +662,7 @@ void server() {
 
     int pid = fork();
     if(pid == 0) {
-        main_networking();
+        main_networking(port);
     }else{
         main_loop();
     }    

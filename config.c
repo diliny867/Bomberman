@@ -1,5 +1,12 @@
 #include "config.h"
 
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
 int pings[256];
 
 int clampi_min(int val, int min) {
@@ -49,12 +56,50 @@ int get_payload_size(uint8_t type) {
     return 0;
 }
 
+void dump_bytes(void *data, int size) {
+    printf("Dumping: %p of %d bytes: ", data, size);
+    char *buf = data;
+    for(int i = 0; i < size; i++){
+        printf("|%d", buf[i]);
+    }
+    printf("|\n");
+}
+
+msg_generic_t make_header(uint8_t msg_type, uint8_t sender_id, uint8_t target_id) {
+    msg_generic_t header;
+    header.msg_type 
+     = msg_type;
+    header.sender_id = sender_id;
+    header.target_id = target_id;
+    // if(payload)
+    //     memcpy(p.payload, payload, get_payload_size(msg_type));
+    return header;
+}
+
+void send_packet_simple(int socket, packet_t *packet) {
+
+    printf("Sending packet type: %hhu  to: %hhu  from: %hhu\n", packet->header.msg_type, packet->header.target_id, packet->header.sender_id);
+
+    int header_size =  sizeof(msg_generic_t);
+    int payload_size = get_payload_size(packet->header.msg_type);
+    if(packet->header.msg_type == MSG_ERROR)
+        payload_size += strlen(packet->payload.error.error);
+    
+    // copy if packet_t is not packed(aligned)
+    // char data[sizeof(packet_t)];
+    // memcpy(data, &packet->header, header_size);
+    // memcpy(data + header_size, &packet->payload, payload_size);
+    // write(socket, data, header_size + payload_size);
+
+    write(socket, packet, header_size + payload_size);
+}
+
 void send_simple(int socket, uint8_t msg_type, uint8_t sender_id, uint8_t target_id) {
-    packet_t packet;
-    packet.header.msg_type = msg_type;
-    packet.header.sender_id = sender_id;
-    packet.header.target_id = target_id;
-    send_packet_simple(socket, &packet);
+    msg_generic_t header;
+    header.msg_type = msg_type;
+    header.sender_id = sender_id;
+    header.target_id = target_id;
+    write(socket, &header, sizeof(msg_generic_t));
 }
 
 void send_ping(int socket, uint8_t target_id, uint8_t sender_id, bool send_pong) {
