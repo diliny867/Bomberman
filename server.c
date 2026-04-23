@@ -61,6 +61,8 @@ typedef struct {
 
 static shared_state_t *ss;
 
+#define pli(id) ss->plis[(id)]
+
 
 static inline void make_shared_memory() {
     ss = mmap(NULL, sizeof(shared_state_t), PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS, -1, 0);
@@ -380,10 +382,13 @@ void handle_game_packets() {
                 strcpy(welcome.version, VERSION);
                 welcome.game_status = ss->game_status;
                 welcome.player_count = ss->player_count;
+                int player_index = 0;
                 for(int i = 0; i < MAX_PLAYERS; i++) {
                     if(ss->players[i].id == 0) continue;
-                    welcome.players[i].ready = ss->players[i].ready;
-                    strcpy(welcome.players[i].name, ss->players[i].name);
+                    welcome.players[player_index].id = i;
+                    welcome.players[player_index].ready = ss->players[i].ready;
+                    strcpy(welcome.players[player_index].name, ss->players[i].name);
+                    player_index++;
                 }
                 push_payload(MSG_WELCOME, 255, header.sender_id, (payload_t*)&welcome);
                 payload_map_t pm;

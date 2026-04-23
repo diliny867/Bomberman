@@ -17,9 +17,36 @@ static uint8_t map_width = 0;
 static uint8_t map_height = 0;
 static uint8_t map[MAP_SIZE_MAX];
 
+static uint8_t game_status = GAME_LOBBY;
+
+static int player_count = 0;
+static player_t players[MAX_PLAYERS] = { 0 };
+
+static uint8_t plis[256] = { 0 };
+#define pli(id) plis[id]
+
+
+void client_send_simple(uint8_t msg_type) {
+    send_simple(server_socket, msg_type, my_id, 255);
+}
+
+void send_try_bomb(uint16_t coord) {
+    packet_t p;
+    p.header = make_header(MSG_BOMB_ATTEMPT, my_id, 255);
+    p.bomb_attempt.coord = coord;
+    send_packet_simple(server_socket, &p);
+}
+
+void send_try_move(uint8_t direction) {
+    packet_t p;
+    p.header = make_header(MSG_MOVE_ATTEMPT, my_id, 255);
+    p.move_attempt.direction = direction;
+    send_packet_simple(server_socket, &p);
+}
 
 int handle_packet(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload_t *payload) {
     my_id = target_id;
+    plis[my_id] = 0;
 
     switch(msg_type) {
     case MSG_DISCONNECT: return 1;
@@ -31,10 +58,24 @@ int handle_packet(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payloa
     } break;
     case MSG_WELCOME: {
         payload_welcome_t *p = (payload_welcome_t*)payload;
-
+        game_status = p->game_status;
+        player_count = 1;
+        for(int i = 0; i < p->player_count) {
+            plis[p->players[i].id] = player_count++;
+            int index = pli(p->players[i].id);
+            players[index].id = p->players[i].id;
+            players[index].ready = p->players[i].ready;
+            strcpy(players[index].name, p->players[i].name);
+        }
     } break;
     case MSG_LEAVE: {
-
+        for(int i = 0; i < MAX_PLAYERS; i++) {
+            if(players[i].id == sender_id) {
+                players[i].id = 0;
+                player_count--;
+                break;
+            }
+        }
     } break;
     case MSG_ERROR: {
         payload_error_t *p = (payload_error_t*)payload;
@@ -42,14 +83,16 @@ int handle_packet(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payloa
     } break;
     case MSG_MAP: {
         payload_map_t *p = (payload_map_t*)payload;
-        
+        map_width  = p->width;
+        map_height = p->height;
+        memcpy(map, p->map, map_width * map_height * sizeof(uint8_t));
     } break;
     case MSG_SET_READY : {
-
+        client_send_simple(MSG_SET_READY);
     } break;
     case MSG_SET_STATUS : {
         payload_set_status_t *p = (payload_set_status_t*)payload;
-
+        game_status = p->game_status;
     } break;
     case MSG_WINNER : {
         payload_winner_t *p = (payload_winner_t*)payload;

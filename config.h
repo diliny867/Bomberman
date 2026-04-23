@@ -81,7 +81,8 @@ typedef struct {
     uint8_t game_status;
     uint8_t player_count;
     struct {
-        uint8_t ready;
+        uint8_t id;
+        bool ready;
         char name[30];
     } players[MAX_PLAYERS];
     // } players[];
@@ -199,9 +200,8 @@ typedef struct {
 extern int pings[256];
 
 #define GET_I(x, y, width) ((y) * (width) + (x))
-#define pli(id) ss->plis[(id)]
 
-#define celli_to_i(i)   (ss->map[i] - '1')
+#define celli_to_i(cell, i)   ((uint8_t)cell - '1')
 #define id_to_celli(id) (pli(id) + '1')
 
 #define arr_erase(arr, i, count) memmove((arr), (arr) + 1, ((count) - (i) - 1) * sizeof(arr[0]))

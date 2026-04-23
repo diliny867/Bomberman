@@ -57,12 +57,12 @@ int get_payload_size(uint8_t type) {
 }
 
 void dump_bytes(void *data, int size) {
-    printf("Dumping: %p of %d bytes: ", data, size);
+    log("Dumping: %p of %d bytes: ", data, size);
     char *buf = data;
     for(int i = 0; i < size; i++){
-        printf("|%d", buf[i]);
+        log("|%d", buf[i]);
     }
-    printf("|\n");
+    log("|\n");
 }
 
 msg_generic_t make_header(uint8_t msg_type, uint8_t sender_id, uint8_t target_id) {
@@ -78,7 +78,7 @@ msg_generic_t make_header(uint8_t msg_type, uint8_t sender_id, uint8_t target_id
 
 void send_packet_simple(int socket, packet_t *packet) {
 
-    printf("Sending packet type: %hhu  to: %hhu  from: %hhu\n", packet->header.msg_type, packet->header.target_id, packet->header.sender_id);
+    log("Sending packet type: %hhu  to: %hhu  from: %hhu\n", packet->header.msg_type, packet->header.target_id, packet->header.sender_id);
 
     int header_size =  sizeof(msg_generic_t);
     int payload_size = get_payload_size(packet->header.msg_type);
