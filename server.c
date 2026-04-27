@@ -196,6 +196,14 @@ bool cell_empty(int i) {
 
 
 bool cell_explode(int x, int y) {
+    for(int i = 0; i < MAX_PLAYERS; i++) {
+        if(ss->players[i].id == 0) continue;
+        if(ss->players[i].row == x && ss->players[i].col == y){
+            payload_death_t p;
+            p.death_id = ss->players[i].id;
+            push_payload(MSG_DEATH, 255, 254, (payload_t*)&p);
+        }
+    }
     int i = GET_I(x, y, ss->map_width);
     switch(ss->map[i]) {
     case CELL_BOMB:
@@ -225,11 +233,9 @@ bool cell_explode(int x, int y) {
         } return true;
     // case '1': case '2': case '3': case '4': case '5': case '6': case '7': case '8': {
     //     int id = celli_to_id(i);
-
     //     payload_death_t p;
     //     p.death_id = id;
     //     push_payload(MSG_DEATH, 255, 254, &p);
-
     //     } break;
     }
     return false;
@@ -443,7 +449,7 @@ void handle_game_packets() {
                 if(cell == CELL_SPEEDUP || cell == CELL_RADIUSUP || cell == CELL_TICKUP) {
                     player->speed            -= cell == CELL_SPEEDUP;
                     player->bomb_radius      += cell == CELL_RADIUSUP;
-                    player->bomb_timer_ticks += cell == CELL_TICKUP;
+                    player->bomb_timer_ticks += (cell == CELL_TICKUP) * 10;
 
                     payload_bonus_retrieved_t p;
                     p.player_id = player->id;

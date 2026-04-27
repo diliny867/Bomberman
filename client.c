@@ -18,13 +18,79 @@ static uint8_t map_height = 0;
 static uint8_t map[MAP_SIZE_MAX];
 
 static uint8_t game_status = GAME_LOBBY;
+static int winner = 0;
 
 static int player_count = 0;
 static player_t players[MAX_PLAYERS] = { 0 };
 
+static int bomb_count = 0;
+static bomb_t bombs[MAP_SIZE_MAX] = { 0 };
+
 static uint8_t plis[256] = { 0 };
 #define pli(id) plis[id]
 
+void draw_cell(int coord, char pixel) {
+
+}
+
+void draw_map() {
+    for(int i = 0; i < map_width * map_height; i++) {
+        draw_cell(i, map[i]);
+    }
+}
+void draw_bombs() {
+    for(int i = 0; i < bomb_count; i++) {
+        int row = bombs[i].row, col = bombs[i].col, radius = bombs[i].radius, width = map_width, height = map_height;
+        int index = GET_I(row, col, width);
+        if(radius == 0) {
+            draw_cell(index, 'o');
+        }else {
+            int xl  = clampi_min(row - radius, 0);
+            int xls = clampi_min(row - 1, 0);
+            int xr  = clampi_max(row + radius, width - 1);
+            int xrs = clampi_max(row + 1, width - 1);
+            int yt  = clampi_min(col - radius, 0);
+            int yts = clampi_min(col - 1, 0);
+            int yb  = clampi_max(col + radius, height - 1);
+            int ybs = clampi_max(col + 1, height - 1);
+            for(int x = xls; x >= xl; x--) {
+                draw_cell(index, '>');
+            }
+            for(int x = xrs; x <= xr; x++) {
+                draw_cell(index, '<');
+            }
+            for(int y = yts; y >= yt; y--) {
+                draw_cell(index, '^');
+            }
+            for(int y = ybs; y <= yb; y++) {
+                draw_cell(index, 'v');
+            }
+        }
+    }
+}
+void draw_players() {
+    for(int i = 0; i < MAX_PLAYERS; i++) {
+        if(players[i].id == 0 || players[i].alive) continue;
+        int index = GET_I(players[i].row, players[i].col, map_width);
+        draw_cell(index, '1' + i);
+    }
+}
+void draw_text(int x, int y, char *text) {
+
+}
+void draw() {
+    if(game_status == GAME_LOBBY){
+        draw_text(map_width / 2, map_height / 2 - 2, "Lobby");
+    }else if(game_status == GAME_RUNNING){
+        draw_map();
+        draw_bombs();
+        draw_players();
+    }else if(game_status == GAME_END){
+        char buf[20];
+        sprintf(buf, "Winner: %d", winner);
+        draw_text(map_width / 2, map_height / 2 - 5, buf);
+    }
+}
 
 void client_send_simple(uint8_t msg_type) {
     send_simple(server_socket, msg_type, my_id, 255);
@@ -33,20 +99,21 @@ void client_send_simple(uint8_t msg_type) {
 void send_try_bomb(uint16_t coord) {
     packet_t p;
     p.header = make_header(MSG_BOMB_ATTEMPT, my_id, 255);
-    p.bomb_attempt.coord = coord;
+    p.payload.bomb_attempt.coord = coord;
     send_packet_simple(server_socket, &p);
 }
 
 void send_try_move(uint8_t direction) {
     packet_t p;
     p.header = make_header(MSG_MOVE_ATTEMPT, my_id, 255);
-    p.move_attempt.direction = direction;
+    p.payload.move_attempt.direction = direction;
     send_packet_simple(server_socket, &p);
 }
 
 int handle_packet(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payload_t *payload) {
     my_id = target_id;
     plis[my_id] = 0;
+    players[pli(my_id)].id = 0;
 
     switch(msg_type) {
     case MSG_DISCONNECT: return 1;
@@ -60,7 +127,7 @@ int handle_packet(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payloa
         payload_welcome_t *p = (payload_welcome_t*)payload;
         game_status = p->game_status;
         player_count = 1;
-        for(int i = 0; i < p->player_count) {
+        for(int i = 0; i < p->player_count; i++) {
             plis[p->players[i].id] = player_count++;
             int index = pli(p->players[i].id);
             players[index].id = p->players[i].id;
@@ -96,39 +163,76 @@ int handle_packet(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payloa
     } break;
     case MSG_WINNER : {
         payload_winner_t *p = (payload_winner_t*)payload;
-
+        winner = pli(p->id) + 1;
+        game_status = GAME_END;
     } break;
     case MSG_MOVED : {
         payload_moved_t *p = (payload_moved_t*)payload;
-
+        int i = pli(p->player_id);
+        int row = p->coord % map_width;
+        int col = p->coord / map_width;
+        players[i].row = row;
+        players[i].col = col;
     } break;
     case MSG_BOMB : {
         payload_bomb_t *p = (payload_bomb_t*)payload;
-
+        bombs[bomb_count].owner_id = p->player_id;
+        bombs[bomb_count].row = p->coord % map_width;
+        bombs[bomb_count].col = p->coord / map_width;
+        bombs[bomb_count].radius = 0;
+        bombs[bomb_count].timer_ticks = 0;
+        bomb_count++;
     } break;
     case MSG_EXPLOSION_START : {
         payload_explosion_start_t *p = (payload_explosion_start_t*)payload;
-
+        for(int i = 0; i < bomb_count; i++) {
+            int coord = bombs[i].row + bombs[i].col * map_width;
+            if(coord == p->coord) {
+                bombs[i].radius = p->radius;
+            }
+        }
     } break;
     case MSG_EXPLOSION_END : {
         payload_explosion_end_t *p = (payload_explosion_end_t*)payload;
-
+        for(int i = 0; i < bomb_count; i++) {
+            int coord = bombs[i].row + bombs[i].col * map_width;
+            if(coord == p->coord) {
+                bombs[i] = bombs[bomb_count - 1];
+            }
+        }
+        bomb_count--;
     } break;
     case MSG_DEATH : {
         payload_death_t *p = (payload_death_t*)payload;
-
+        for(int i = 0; i < MAX_PLAYERS; i++) {
+            if(players[i].id == p->death_id) {
+                players[i].alive = false;
+                break;
+            }
+        }
     } break;
     case MSG_BONUS_AVAILABLE : {
         payload_bonus_available_t *p = (payload_bonus_available_t*)payload;
-
+        switch(p->type) {
+        case BONUS_SPEED:
+            map[p->coord] = 's';
+            break;
+        case BONUS_RADIUS:
+            map[p->coord] = 'r';
+            break;
+        case BONUS_TIMER:
+            map[p->coord] = 't';
+            break;
+        default: break;
+        }
     } break;
     case MSG_BONUS_RETRIEVED : {
         payload_bonus_retrieved_t *p = (payload_bonus_retrieved_t*)payload;
-
+        map[p->coord] = ' ';
     } break;
     case MSG_BLOCK_DESTROYED : {
         payload_block_destroyed_t *p = (payload_block_destroyed_t*)payload;
-
+        map[p->coord] = ' ';
     } break;
     // case MSG_HELLO: case MSG_MOVE_ATTEMPT: case MSG_BOMB_ATTEMPT: client ignores these
     default: break;
@@ -198,8 +302,10 @@ void client(char *name, char *ip, int port) {
     while (1) {
         // Handle Input
 
-        
 
+
+        // draw the thing
+        draw();
 
         // wait for socket or timeouts
         fd_set rfds;
