@@ -14,6 +14,9 @@
 #define log(...) printf(__VA_ARGS__)
 // #define log(...) 
 
+// #define client_log(...) log(__VA_ARGS__)
+#define client_log(...)
+
 #define MAX_PLAYERS 8
 #define TICKS_PER_SECOND 20
 
@@ -38,7 +41,8 @@ typedef enum {
     BONUS_NONE = 0,
     BONUS_SPEED = 1,
     BONUS_RADIUS = 2,
-    BONUS_TIMER = 3
+    BONUS_TIMER = 3,
+    BONUS_BOMB = 4
 } bonus_type_t;
 
 typedef enum {
@@ -82,6 +86,7 @@ typedef struct {
     uint8_t player_count;
     struct {
         uint8_t id;
+        uint8_t i;
         bool ready;
         char name[30];
     } players[MAX_PLAYERS];
@@ -171,6 +176,7 @@ typedef struct {
     uint16_t bomb_timer_ticks;
     uint16_t speed;
 
+    uint8_t max_bombs;
     uint16_t move_ticks;
 } player_t;
 
@@ -190,6 +196,7 @@ typedef struct {
 #define CELL_SPEEDUP  'A'
 #define CELL_RADIUSUP 'R'
 #define CELL_TICKUP   'T'
+#define CELL_BOMBUP   '+'
 
 typedef struct {
     msg_generic_t header;
