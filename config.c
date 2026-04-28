@@ -78,7 +78,7 @@ msg_generic_t make_header(uint8_t msg_type, uint8_t sender_id, uint8_t target_id
 
 void send_packet_simple(int socket, packet_t *packet) {
 
-    log("Sending packet type: %hhu  to: %hhu  from: %hhu\n", packet->header.msg_type, packet->header.target_id, packet->header.sender_id);
+    log2("Sending packet type: %hhu  to: %hhu  from: %hhu\n", packet->header.msg_type, packet->header.target_id, packet->header.sender_id);
 
     int header_size =  sizeof(msg_generic_t);
     int payload_size = get_payload_size(packet->header.msg_type);

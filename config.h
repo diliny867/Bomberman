@@ -14,8 +14,8 @@
 #define log(...) printf(__VA_ARGS__)
 // #define log(...) 
 
-// #define client_log(...) log(__VA_ARGS__)
-#define client_log(...)
+// #define log2(...) log(__VA_ARGS__)
+#define log2(...)
 
 #define MAX_PLAYERS 8
 #define TICKS_PER_SECOND 20
@@ -190,13 +190,13 @@ typedef struct {
 } bomb_t;
 
 #define CELL_EMPTY    '.'
-#define CELL_HARD     'H'
-#define CELL_SOFT     'S'
-#define CELL_BOMB     'B'
-#define CELL_SPEEDUP  'A'
-#define CELL_RADIUSUP 'R'
-#define CELL_TICKUP   'T'
-#define CELL_BOMBUP   '+'
+#define CELL_HARD     '@'
+#define CELL_SOFT     '#'
+#define CELL_BOMB     'O'
+#define CELL_SPEEDUP  's'
+#define CELL_RADIUSUP 'r'
+#define CELL_TICKUP   't'
+#define CELL_BOMBUP   'b'
 
 typedef struct {
     msg_generic_t header;

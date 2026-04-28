@@ -68,6 +68,71 @@ static inline void make_shared_memory() {
     ss = mmap(NULL, sizeof(shared_state_t), PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS, -1, 0);
 }
 
+void random_map(char *file_name) {
+    FILE *fout = fopen(file_name, "w");
+
+    int width = 10 + rand() % 20;
+    int height = 10 + rand() % 10;
+    int preample = fprintf(fout, "%d %d %d %d %d %d", width, height, 10, 15, 1, 40);
+
+    for(int y = 0; y < height; y++) {
+        for(int x = 0; x < width; x++) {
+            int c = rand() % 2 == 0 ? CELL_EMPTY : CELL_SOFT;
+            fputc(c, fout);
+        }
+        // fputc('\n', fout);
+    }
+
+    int hard_count = rand() % (width * height / 6);
+    for(int i = 0; i < hard_count; i++) {
+        int coord = preample + rand() % (width * height);
+        fseek(fout, coord, SEEK_SET);
+        fputc(CELL_HARD, fout);
+    }
+
+    int bonus_count = width / 2 + rand() % (width / 2);
+    for(int i = 0; i < bonus_count; i++) {
+        int b = 1 + rand() % 4;
+        int coord = preample + rand() % (width * height);
+        fseek(fout, coord, SEEK_SET);
+        if(b == BONUS_SPEED){
+            fputc(CELL_SPEEDUP, fout);
+        }
+        if(b == BONUS_RADIUS){
+            fputc(CELL_RADIUSUP, fout);
+        }
+        if(b == BONUS_TIMER){
+            fputc(CELL_TICKUP, fout);
+        }
+        if(b == BONUS_BOMB){
+            fputc(CELL_BOMBUP, fout);
+        }
+    }
+
+    int player_positions[MAX_PLAYERS];
+    for(int i = 0; i < MAX_PLAYERS; i++) {
+        int x = 1 + rand() % (width - 2);
+        int y = 1 + rand() % (height - 2);
+        int coord = preample + GET_I(x, y, width);
+        player_positions[i] = coord;
+        // clear around player
+        fseek(fout, coord - 1, SEEK_SET);
+        fputc(CELL_EMPTY, fout);
+        fseek(fout, coord + 1, SEEK_SET);
+        fputc(CELL_EMPTY, fout);
+        fseek(fout, coord - width, SEEK_SET);
+        fputc(CELL_EMPTY, fout);
+        fseek(fout, coord + width, SEEK_SET);
+        fputc(CELL_EMPTY, fout);
+    }
+    // fill players after to not delete previous player position
+    for(int i = 0; i < MAX_PLAYERS; i++) {
+        fseek(fout, preample + player_positions[i], SEEK_SET);
+        fputc('1' + i, fout);
+    }
+
+    fclose(fout);
+}
 
 void read_map(char *name) {
     FILE *fin = fopen(name, "r");
@@ -308,7 +373,7 @@ void tick(){
         return;
     }
 
-    if(ss->bonus_count < 8) {
+    if(ss->bonus_count < ss->map_width) {
         if(ss->bonus_timeout <= 0) {
             int size = ss->map_width * ss->map_height;
             for(int i = 0; i < 8; i++) {
@@ -465,13 +530,13 @@ void handle_game_packets() {
                 for(int i = 0; i < MAX_PLAYERS; i++) {
                     if(ss->players[i].id == 0) continue;
 
-                    int p_index;
-                    if(ss->players[i].id == header.sender_id) {
-                        p_index = 0;
-                    }else{
-                        p_index = 1 + player_index;
-                        player_index++;
-                    }
+                    int p_index = player_index++;
+                    // if(ss->players[i].id == header.sender_id) {
+                    //     p_index = 0;
+                    // }else{
+                    //     p_index = 1 + player_index;
+                    //     player_index++;
+                    // }
 
                     welcome.players[p_index].id = ss->players[i].id;
                     welcome.players[p_index].ready = ss->players[i].ready;
@@ -482,7 +547,7 @@ void handle_game_packets() {
                 }
 
                 push_payload(MSG_WELCOME, 255, 254, (payload_t*)&welcome);
-                push_payload(MSG_MAP, 255, header.sender_id, (payload_t*)&pm);
+                push_payload(MSG_MAP, 255, 254, (payload_t*)&pm);
             }else {
                 push_payload(MSG_DISCONNECT, 255, header.sender_id, NULL);
             }
@@ -768,7 +833,11 @@ void server(int port) {
     ss->game_status = GAME_LOBBY;
     ss->plis[255] = 255;
 
-    read_map("main.map");
+    char *rand_map_name = "map_tmp_tmp___.map_tmp";
+    random_map(rand_map_name);
+    read_map(rand_map_name);
+    
+    // read_map("main.map");
 
     int pid = fork();
     if(pid == 0) {

@@ -225,7 +225,7 @@ int handle_packet(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payloa
         memcpy(map, p->map, map_width * map_height * sizeof(uint8_t));
         for(int i = 0; i < map_width * map_height; i++) {
             int index = map[i] - '1';
-            if(map[i] >= '1' && map[i] <= '8') {
+            if(map[i] >= '1' && map[i] <= '8' && players[index].id != 0) {
                 players[index].row = i % map_width;
                 players[index].col = i / map_width;
                 players[index].ready = 0;
@@ -258,7 +258,7 @@ int handle_packet(uint8_t msg_type, uint8_t sender_id, uint8_t target_id, payloa
         int col = p->coord / map_width;
         players[i].row = row;
         players[i].col = col;
-        client_log("New row: %d  col: %d  i: %d  my_i: %d\n", row, col, pli(p->player_id), pli(my_id));
+        log2("New row: %d  col: %d  i: %d  my_i: %d\n", row, col, pli(p->player_id), pli(my_id));
     } break;
     case MSG_BOMB : {
         payload_bomb_t *p = (payload_bomb_t*)payload;
@@ -376,7 +376,7 @@ void client(char *name, char *ip, int port) {
         random_str(name, 20);
     }
 
-    client_log("name: %s version: %s\n", name, VERSION);
+    log2("name: %s version: %s\n", name, VERSION);
 
     struct sockaddr_in server_addr;
 
@@ -398,7 +398,7 @@ void client(char *name, char *ip, int port) {
         return;
     }
 
-    client_log("Connected to server %s:%d\n", ip, port);
+    log2("Connected to server %s:%d\n", ip, port);
 
     packet_t p;
     p.header = make_header(MSG_HELLO, my_id, 255);
@@ -425,10 +425,10 @@ void client(char *name, char *ip, int port) {
         int ready = select(server_socket + 1, &rfds, NULL, NULL, &tv);
         if (ready <= 0) continue;
 
-        client_log("Client read:\n");
+        log2("Client read:\n");
         ssize_t n = read(server_socket, buffer, sizeof(buffer));
         if (n <= 0) break;
-        client_log("Read from server %ld bytes\n", n);
+        log2("Read from server %ld bytes\n", n);
 
         int msg_size = 0;
         while(msg_size < n) {
@@ -438,7 +438,7 @@ void client(char *name, char *ip, int port) {
             sender_id = in[1];
             target_id = in[2];
             payload   = (payload_t*)(in + sizeof(msg_generic_t));
-            client_log("msg_type: %hhu sender_id: %hhu target_id: %hhu\n", msg_type, sender_id, target_id);
+            log2("msg_type: %hhu sender_id: %hhu target_id: %hhu\n", msg_type, sender_id, target_id);
 
             if(handle_packet(msg_type, sender_id, target_id, payload))
                 break;
