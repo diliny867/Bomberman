@@ -1,4 +1,4 @@
-#include "client.h"
+/*#include "client.h"
 
 #include "server.h"
 #include <stdio.h>
@@ -333,5 +333,245 @@ void client(char *name, char *ip, int port) {
 
     log("Client exit\n");
 
+    close(server_socket);
+ } */
+
+#include "client.h"
+#include "server.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <assert.h>
+#include <time.h>
+#include <arpa/inet.h>
+#include <ncurses.h>
+
+/* ===================== STATE ===================== */
+
+static uint8_t my_id = 0;
+static int server_socket = 0;
+
+static uint8_t map_width = 0;
+static uint8_t map_height = 0;
+static uint8_t map[MAP_SIZE_MAX];
+
+static uint8_t game_status = GAME_LOBBY;
+static int winner = 0;
+
+static int player_count = 0;
+static player_t players[MAX_PLAYERS] = { 0 };
+
+static int bomb_count = 0;
+static bomb_t bombs[MAP_SIZE_MAX] = { 0 };
+
+static uint8_t plis[256] = { 0 };
+#define pli(id) plis[id]
+
+/* ===================== UI ===================== */
+
+void init_ui() {
+    initscr();
+    noecho();
+    cbreak();
+    keypad(stdscr, TRUE);
+    nodelay(stdscr, TRUE);
+    curs_set(0);
+}
+
+void shutdown_ui() {
+    endwin();
+}
+
+/* ===================== DRAW ===================== */
+
+void draw_cell(int coord, char pixel) {
+    int x = coord % map_width;
+    int y = coord / map_width;
+    mvaddch(y, x, pixel);
+}
+
+void draw_text(int x, int y, char *text) {
+    mvprintw(y, x, "%s", text);
+}
+
+void draw_map() {
+    for(int i = 0; i < map_width * map_height; i++) {
+        draw_cell(i, map[i]);
+    }
+}
+
+/* ==== FIXED EXPLOSION ==== */
+void draw_bombs() {
+    for(int i = 0; i < bomb_count; i++) {
+        int row = bombs[i].row;
+        int col = bombs[i].col;
+        int radius = bombs[i].radius;
+
+        int center = GET_I(row, col, map_width);
+
+        if(radius == 0) {
+            draw_cell(center, 'o');
+        } else {
+            draw_cell(center, '*');
+
+            for(int r = 1; r <= radius; r++) {
+
+                if(row - r >= 0)
+                    draw_cell(GET_I(row - r, col, map_width), '|');
+
+                if(row + r < map_height)
+                    draw_cell(GET_I(row + r, col, map_width), '|');
+
+                if(col - r >= 0)
+                    draw_cell(GET_I(row, col - r, map_width), '-');
+
+                if(col + r < map_width)
+                    draw_cell(GET_I(row, col + r, map_width), '-');
+            }
+        }
+    }
+}
+
+void draw_players() {
+    for(int i = 0; i < MAX_PLAYERS; i++) {
+        if(players[i].id == 0 || !players[i].alive) continue;
+
+        int index = GET_I(players[i].row, players[i].col, map_width);
+        draw_cell(index, '1' + i);
+    }
+}
+
+void draw() {
+    clear();
+
+    if(game_status == GAME_LOBBY){
+        draw_text(2, 2, "Lobby");
+    }
+    else if(game_status == GAME_RUNNING){
+        draw_map();
+        draw_bombs();
+        draw_players();
+    }
+    else if(game_status == GAME_END){
+        char buf[50];
+        sprintf(buf, "Winner: %d", winner);
+        draw_text(2, 2, buf);
+    }
+
+    refresh();
+}
+
+/* ===================== INPUT ===================== */
+
+void handle_input() {
+    int ch = getch();
+
+    switch(ch) {
+        case KEY_UP:    send_try_move(0); break;
+        case KEY_DOWN:  send_try_move(1); break;
+        case KEY_LEFT:  send_try_move(2); break;
+        case KEY_RIGHT: send_try_move(3); break;
+
+        case ' ':
+            if(player_count > 0) {
+                int coord = players[pli(my_id)].row +
+                            players[pli(my_id)].col * map_width;
+                send_try_bomb(coord);
+            }
+            break;
+    }
+}
+
+/* ===================== NETWORK ===================== */
+
+void client_send_simple(uint8_t msg_type) {
+    send_simple(server_socket, msg_type, my_id, 255);
+}
+
+void send_try_bomb(uint16_t coord) {
+    packet_t p;
+    p.header = make_header(MSG_BOMB_ATTEMPT, my_id, 255);
+    p.payload.bomb_attempt.coord = coord;
+    send_packet_simple(server_socket, &p);
+}
+
+void send_try_move(uint8_t direction) {
+    packet_t p;
+    p.header = make_header(MSG_MOVE_ATTEMPT, my_id, 255);
+    p.payload.move_attempt.direction = direction;
+    send_packet_simple(server_socket, &p);
+}
+
+/* ===================== CLIENT ===================== */
+
+void client(char *name, char *ip, int port) {
+    srand(time(0));
+    init_ui();
+
+    char _tmp_name[30];
+    if(name == NULL) {
+        name = _tmp_name;
+        for(int i = 0; i < 20; i++)
+            name[i] = 'a' + rand()%26;
+        name[20] = 0;
+    }
+
+    struct sockaddr_in server_addr;
+
+    server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_socket < 0) {
+        perror("socket");
+        shutdown_ui();
+        return;
+    }
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(port);
+    inet_pton(AF_INET, ip, &server_addr.sin_addr);
+
+    if (connect(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("connect");
+        shutdown_ui();
+        close(server_socket);
+        return;
+    }
+
+    packet_t p;
+    p.header = make_header(MSG_HELLO, my_id, 255);
+    strcpy(p.payload.hello.version, VERSION);
+    strcpy(p.payload.hello.name, name);
+    send_packet_simple(server_socket, &p);
+
+    char buffer[100000];
+
+    while (1) {
+
+        handle_input();
+        draw();
+
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(server_socket, &rfds);
+
+        struct timeval tv = {0, 10000};
+
+        int ready = select(server_socket + 1, &rfds, NULL, NULL, &tv);
+        if (ready <= 0) continue;
+
+        ssize_t n = read(server_socket, buffer, sizeof(buffer));
+        if (n <= 0) break;
+
+        uint8_t msg_type  = buffer[0];
+        uint8_t sender_id = buffer[1];
+        uint8_t target_id = buffer[2];
+        payload_t *payload = (payload_t*)(buffer + sizeof(msg_generic_t));
+
+        if(handle_packet(msg_type, sender_id, target_id, payload))
+            break;
+    }
+
+    shutdown_ui();
     close(server_socket);
 }
